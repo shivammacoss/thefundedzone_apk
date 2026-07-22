@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Chart</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #0e0e0e; overflow: hidden; }
+    #tv_chart { position: absolute; inset: 0; }
+    #tv_overlay { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 3; }
+    #boot_err {
+      position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+      color: #ef5350; font: 14px -apple-system, Roboto, sans-serif; text-align: center; padding: 24px; z-index: 9;
+    }
+  </style>
+</head>
+<body>
+  <div id="tv_chart"></div>
+  <div id="tv_overlay"></div>
+  <div id="boot_err"></div>
+
+  <script src="datafeed.js"></script>
+  <script>
+  (function () {
+    var CFG = window.__TFZ_CONFIG__ || {};
+    var API = (CFG.apiBase || 'https://thefundedzone.com').replace(/\/$/, '');
+    var TOKEN = CFG.token || '';
+    var ACCOUNT_ID = CFG.accountId || '';
+    var THEME = (CFG.theme === 'light') ? 'light' : 'dark';
+    var SYMBOL = (CFG.symbol || 'XAUUSD').toUpperCase();
+    // Where the charting_library folder lives relative to this page.
+    // Bundled-in-app → 'charting_library/' (same dir). Web-hosted → '/charting_library/'.
+    var LIB = CFG.libraryPath || 'charting_library/';
+
+    function authHeaders() { return TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {}; }
+    function postRN(type, payload) {
+      try {
+        if (window.ReactNativeWebView) {
+          window.ReactNativeWebView.postMessage(JSON.stringify({ type: type, payload: payload || null }));
+        }
+      } catch (e) {}
+    }
+    function showError(msg) {
+      var el = document.getElementById('boot_err'); el.textContent = msg; el.style.display = 'flex';
+    }
+
+    // Custom in-page modal — replaces window.confirm/prompt so no browser
+    // "The page at … says" chrome / origin URL is shown.
+    function tfzDialog(opts) {
+      var dark = THEME !== 'light';
+      var back = document.createElement('div');
+      back.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:2147483000;display:flex;align-items:center;justify-content:center;padding:24px;';
+      var card = document.createElement('div');
+      card.style.cssText = 'width:100%;max-width:300px;border-radius:12px;padding:16px;box-shadow:0 10px 40px rgba(0,0,0,.5);font-family:-apple-system,Roboto,sans-serif;' + (dark ? 'background:#1a1830;border:1px solid #2a2740;color:#fff;' : 'background:#fff;border:1px solid #e5e7eb;color:#0f172a;');
+      var h = document.createElement('div'); h.textContent = opts.title || ''; h.style.cssText = 'font-size:15px;font-weight:700;margin-bottom:6px;'; card.appendChild(h);
+      if (opts.body) { var bd = document.createElement('div'); bd.textContent = opts.body; bd.style.cssText = 'font-size:12px;opacity:.7;margin-bottom:12px;'; card.appendChild(bd); }
+      var input = null;
+      if (opts.input) {
+        input = document.createElement('input'); input.type = 'text'; input.inputMode = 'decimal';
+        input.value = opts.input.defaultValue || ''; input.placeholder = opts.input.placeholder || '';
+        input.style.cssText = 'width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;font-size:15px;margin-bottom:14px;outline:none;' + (dark ? 'background:#0f0e1c;border:1px solid #2a2740;color:#fff;' : 'background:#f8fafc;border:1px solid #e5e7eb;color:#0f172a;');
+        card.appendChild(input);
+      }
+      var row = document.createElement('div'); row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
+      var cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Cancel';
+      cancel.style.cssText = 'padding:9px 14px;border:0;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;' + (dark ? 'background:#2a2740;color:#cbd5e1;' : 'background:#f1f5f9;color:#475569;');
+      var ok = document.createElement('button'); ok.type = 'button'; ok.textContent = opts.confirmLabel || 'OK';
+      ok.style.cssText = 'padding:9px 14px;border:0;border-radius:8px;font-size:13px;font-weight:700;color:#fff;cursor:pointer;background:' + (opts.danger ? '#ef4444' : '#5E7BFF') + ';';
+      row.appendChild(cancel); row.appendChild(ok); card.appendChild(row);
+      back.appendChild(card); document.body.appendChild(back);
+      function close() { try { document.body.removeChild(back); } catch (e) {} }
+      cancel.onclick = function () { close(); };
+      back.onclick = function (e) { if (e.target === back) close(); };
+      ok.onclick = function () { var v = input ? input.value : undefined; close(); if (opts.onConfirm) opts.onConfirm(v); };
+      if (input) { setTimeout(function () { try { input.focus(); input.select(); } catch (e) {} }, 50); }
+    }
+
+    var containerEl = document.getElementById('tv_chart');
+    var overlay = document.getElementById('tv_overlay');
+
+    // Load the charting library from the configured path, then boot.
+    var s = document.createElement('script');
+    s.src = LIB + 'charting_library.standalone.js';
+    s.async = true;
+    s.onerror = function () { showError('Charting library failed to load.'); postRN('error', 'charting_library_missing'); };
+    s.onload = boot;
+    document.head.appendChild(s);
+
+    var widget = null;
+    function boot() {
+    if (!window.TradingView || !window.TradingView.widget) {
+      showError('Charting library failed to load.'); postRN('error', 'charting_library_missing'); return;
+    }
+
+    widget = new window.TradingView.widget({
+      container: 'tv_chart',
+      locale: 'en',
+      library_path: LIB,
+      datafeed: window.theFundedZoneDatafeed,
+      symbol: SYMBOL,
+      interval: '5',
+      timezone: 'Etc/UTC',
+      theme: THEME,
+      fullscreen: false,
+      autosize: true,
+      debug: false,
+      disabled_features: [
+        'use_localstorage_for_settings', 'header_compare', 'header_symbol_search',
+        'display_market_status', 'popup_hints', 'header_saveload'
+      ],
+      enabled_features: [
+        'study_templates', 'side_toolbar_in_fullscreen_mode',
+        'pinch_scale', 'horz_touch_drag_scroll', 'vert_touch_drag_scroll'
+      ],
+      overrides: {
+        'mainSeriesProperties.style': 1,
+        'mainSeriesProperties.candleStyle.upColor': '#26a69a',
+        'mainSeriesProperties.candleStyle.downColor': '#ef5350',
+        'mainSeriesProperties.candleStyle.borderUpColor': '#26a69a',
+        'mainSeriesProperties.candleStyle.borderDownColor': '#ef5350',
+        'mainSeriesProperties.candleStyle.wickUpColor': '#26a69a',
+        'mainSeriesProperties.candleStyle.wickDownColor': '#ef5350',
+        'paneProperties.background': THEME === 'dark' ? '#0d0d0d' : '#ffffff',
+        'paneProperties.backgroundType': 'solid',
+        'scalesProperties.textColor': THEME === 'dark' ? '#aaaaaa' : '#555555',
+        'scalesProperties.backgroundColor': THEME === 'dark' ? '#0d0d0d' : '#ffffff'
+      },
+      loading_screen: { backgroundColor: '#0e0e0e', foregroundColor: '#5E7BFF' }
+    });
+
+    var chart = null;
+    var activeSymbol = SYMBOL;
+    var positions = [];        // open positions for the active symbol
+    function primaryPos() { return positions.length ? positions[0] : null; }
+
+    /* ── Position field helpers (app API shape) ── */
+    function isLong(p) { return (p.side || '').toLowerCase() === 'buy'; }
+    function entryPx(p) { return Number(p.open_price) || 0; }
+    function slPx(p) { return p.stop_loss != null ? Number(p.stop_loss) : null; }
+    function tpPx(p) { return p.take_profit != null ? Number(p.take_profit) : null; }
+    function pnlOf(p) { return Number(p.profit) || 0; }
+    function lotsOf(p) { return Math.abs(Number(p.lots) || 0); }
+    function digitsFor(px) { return px >= 100 ? 2 : (px >= 1 ? 4 : 5); }
+    function money(v) { return (v >= 0 ? '+' : '−') + '$' + Math.abs(v).toFixed(2); }
+
+    function curPrice() {
+      var t = (window.__tfzPriceCache || {})[activeSymbol];
+      if (t && t.bid > 0) return (Number(t.bid) + Number(t.ask)) / 2;
+      return 0;
+    }
+    // Projected P&L at a hypothetical price, from the live position P&L.
+    function projectPnl(p, price) {
+      var entry = entryPx(p), cur = curPrice(), curPnl = pnlOf(p);
+      if (!(cur > 0) || Math.abs(cur - entry) < Math.max(Math.abs(entry) * 1e-5, 1e-9)) return null;
+      return (curPnl / (cur - entry)) * (price - entry);
+    }
+    // Correct bracket side vs the live price. Returns null if ok, else message.
+    function bracketError(p, kind, price) {
+      var cur = curPrice();
+      if (!(cur > 0)) return null;
+      var lng = isLong(p);
+      if (kind === 'tp') {
+        var okT = lng ? price > cur : price < cur;
+        if (!okT) return 'TP must be ' + (lng ? 'above' : 'below') + ' current price';
+      } else {
+        var okS = lng ? price < cur : price > cur;
+        if (!okS) return 'SL must be ' + (lng ? 'below' : 'above') + ' current price';
+      }
+      return null;
+    }
+
+    function applyModify(p, patch, label) {
+      var body = { stop_loss: slPx(p), take_profit: tpPx(p) };
+      if (patch.stop_loss !== undefined) body.stop_loss = patch.stop_loss;
+      if (patch.take_profit !== undefined) body.take_profit = patch.take_profit;
+      fetch(API + '/api/v1/positions/' + p.id, {
+        method: 'PUT',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+        body: JSON.stringify(body)
+      })
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+        .then(function () {
+          if (patch.stop_loss !== undefined) p.stop_loss = patch.stop_loss;
+          if (patch.take_profit !== undefined) p.take_profit = patch.take_profit;
+          postRN('modified', { id: p.id, label: label });
+        })
+        .catch(function (err) { postRN('modify_error', { id: p.id, error: String(err) }); loadPositions(); });
+    }
+    function closePosition(p) {
+      fetch(API + '/api/v1/positions/' + p.id + '/close', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()), body: '{}' })
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+        .then(function () { postRN('closed', { id: p.id }); loadPositions(); })
+        .catch(function (err) { postRN('close_error', { id: p.id, error: String(err) }); });
+    }
+
+    /* ── Static trade lines via createShape('horizontal_line') ──
+       (native draggable order/position lines are compiled off on this CL build;
+       drag happens through the HTML overlay below.) */
+    var lines = {}; // key -> { id, price, text, creating }
+    function shapeOpts(text, color, dashed) {
+      return {
+        shape: 'horizontal_line', text: text, lock: true,
+        disableSelection: true, disableSave: true, disableUndo: true,
+        overrides: {
+          linecolor: color, linestyle: dashed ? 2 : 0, linewidth: dashed ? 1 : 2,
+          showLabel: true, textcolor: color, fontsize: 11, bold: true,
+          horzLabelsAlign: 'right', vertLabelsAlign: 'middle'
+        }
+      };
+    }
+    var pnlThrottle = 0;
+    function reconcileLines() {
+      if (!chart || !chart.createShape) return;
+      var desired = [];
+      positions.forEach(function (p) {
+        var d = digitsFor(entryPx(p));
+        desired.push({ key: p.id, price: entryPx(p), color: isLong(p) ? '#2bca6a' : '#ec5d6f',
+          text: (isLong(p) ? 'BUY' : 'SELL') + ' ' + lotsOf(p) + '  ' + money(pnlOf(p)), dashed: false, pnl: true });
+        if (slPx(p) != null && slPx(p) > 0) desired.push({ key: p.id + '-sl', price: slPx(p), color: '#ef4444', text: 'SL ' + slPx(p).toFixed(d), dashed: true });
+        if (tpPx(p) != null && tpPx(p) > 0) desired.push({ key: p.id + '-tp', price: tpPx(p), color: '#14b8a6', text: 'TP ' + tpPx(p).toFixed(d), dashed: true });
+      });
+      var t = Math.floor(Date.now() / 1000), now = Date.now();
+      var wanted = {};
+      desired.forEach(function (x) {
+        wanted[x.key] = true;
+        var ex = lines[x.key];
+        if (!ex) {
+          var entry = { id: null, price: x.price, text: x.text, creating: true };
+          lines[x.key] = entry;
+          chart.createShape({ time: t, price: x.price }, shapeOpts(x.text, x.color, x.dashed)).then(function (id) {
+            if (lines[x.key] === entry) { entry.id = id; entry.creating = false; }
+            else { try { chart.removeEntity(id); } catch (e) {} }
+          }).catch(function () { if (lines[x.key] === entry) delete lines[x.key]; });
+        } else if (ex.id != null) {
+          if (ex.price !== x.price) { try { chart.getShapeById(ex.id).setPoints([{ time: t, price: x.price }]); } catch (e) {} ex.price = x.price; }
+          if (ex.text !== x.text) {
+            var ok = !x.pnl || now - pnlThrottle >= 500;
+            if (ok) { try { chart.getShapeById(ex.id).setProperties({ text: x.text, linecolor: x.color, textcolor: x.color }); } catch (e) {} ex.text = x.text; if (x.pnl) pnlThrottle = now; }
+          }
+        }
+      });
+      Object.keys(lines).forEach(function (key) {
+        if (!wanted[key]) { var ex = lines[key]; if (ex && ex.id != null) { try { chart.removeEntity(ex.id); } catch (e) {} } delete lines[key]; }
+      });
+    }
+
+    function loadPositions() {
+      if (!ACCOUNT_ID || !chart) return;
+      fetch(API + '/api/v1/positions/?account_id=' + encodeURIComponent(ACCOUNT_ID) + '&status=open', { headers: authHeaders() })
+        .then(function (r) { return r.ok ? r.json() : []; })
+        .then(function (data) {
+          var list = Array.isArray(data) ? data : (data && (data.items || data.positions)) || [];
+          positions = list.filter(function (p) { return (p.symbol || '').toUpperCase() === activeSymbol; });
+          reconcileLines();
+        })
+        .catch(function () {});
+    }
+
+    /* ── Price ↔ pixel calibration + drag overlay (proven CL-build recipe) ── */
+    function setupOverlay() {
+      if (!chart || !chart.crossHairMoved || !chart.getPanes) return;
+      var isTouch = ('ontouchstart' in window) || (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+      var buttonsVisible = !isTouch, hideTimer = 0;
+      function revealButtons() {
+        if (!isTouch) return;
+        buttonsVisible = true;
+        if (hideTimer) clearTimeout(hideTimer);
+        hideTimer = setTimeout(function () { buttonsVisible = false; }, 4000);
+      }
+
+      function geom() {
+        try {
+          var pane = chart.getPanes()[0];
+          var ps = pane && pane.getMainSourcePriceScale && pane.getMainSourcePriceScale();
+          if (!ps) return null;
+          var mode = ps.getMode ? ps.getMode() : 0;
+          if (mode !== 0 && mode !== 1) return null;
+          var range = ps.getVisiblePriceRange ? ps.getVisiblePriceRange() : null;
+          var h = pane.getHeight ? pane.getHeight() : 0;
+          if (!range || !(h > 0) || !(range.to > range.from)) return null;
+          if (mode === 1 && !(range.from > 0)) return null;
+          return { top: range.to, bottom: range.from, h: h, log: mode === 1 };
+        } catch (e) { return null; }
+      }
+      function paneY(price, g) {
+        if (g.log) { if (!(price > 0)) return NaN; var lt = Math.log(g.top), lb = Math.log(g.bottom); return (g.h * (lt - Math.log(price))) / (lt - lb); }
+        return (g.h * (g.top - price)) / (g.top - g.bottom);
+      }
+      function priceForY(cy) {
+        var g = geom(); if (!g || calibOffset == null) return null;
+        var py = cy - calibOffset;
+        if (g.log) { var lt = Math.log(g.top), lb = Math.log(g.bottom); return Math.exp(lt - (py / g.h) * (lt - lb)); }
+        return g.top - (py / g.h) * (g.top - g.bottom);
+      }
+
+      var calibOffset = null, crossSeen = false;
+      function onCross(pt) {
+        if (!pt || typeof pt.price !== 'number' || typeof pt.offsetY !== 'number') return;
+        var g = geom(); if (!g) return;
+        var py = paneY(pt.price, g);
+        if (isFinite(py)) {
+          calibOffset = pt.offsetY - py; crossSeen = true;
+          if (isTouch) { var p = primaryPos(); if (p) { var ey = paneY(entryPx(p), g) + calibOffset; if (Math.abs(pt.offsetY - ey) < 34) revealButtons(); } }
+        }
+      }
+      var crossSub = null;
+      try { crossSub = chart.crossHairMoved(); crossSub.subscribe(null, onCross); } catch (e) {}
+
+      // Synthetic-crosshair seed for touch (no hover crosshair fires on mobile).
+      function getMainCanvas(doc) {
+        var canvas = null, bestArea = 0, all = doc.querySelectorAll('canvas');
+        for (var i = 0; i < all.length; i++) { var r = all[i].getBoundingClientRect(); var a = r.width * r.height; if (a > bestArea && r.width > 40 && r.height > 40) { bestArea = a; canvas = all[i]; } }
+        return canvas;
+      }
+      function seedCrosshair() {
+        if (crossSeen) return;
+        try {
+          var iframe = containerEl.querySelector('iframe'); var doc = iframe && iframe.contentDocument; var win = iframe && iframe.contentWindow;
+          if (!doc || !win) return;
+          var canvas = getMainCanvas(doc); if (!canvas) return;
+          var r = canvas.getBoundingClientRect();
+          var cx = r.left + Math.max(20, r.width * 0.35), cy = r.top + r.height * 0.5;
+          var ME = win.MouseEvent || MouseEvent, PE = win.PointerEvent;
+          function fm(type, x, y) { canvas.dispatchEvent(new ME(type, { bubbles: true, cancelable: true, view: win, clientX: x, clientY: y })); }
+          function fp(type, x, y) { if (!PE) return; canvas.dispatchEvent(new PE(type, { bubbles: true, cancelable: true, view: win, clientX: x, clientY: y, pointerId: 1, pointerType: 'mouse', isPrimary: true })); }
+          fp('pointerenter', cx, cy); fp('pointermove', cx, cy); fp('pointermove', cx, cy + 1);
+          fm('mouseenter', cx, cy); fm('mousemove', cx, cy); fm('mousemove', cx, cy + 1);
+        } catch (e) {}
+      }
+      function clearCrosshair() {
+        try {
+          var iframe = containerEl.querySelector('iframe'); var doc = iframe && iframe.contentDocument; var win = iframe && iframe.contentWindow;
+          if (!doc || !win) return; var canvas = getMainCanvas(doc); if (!canvas) return;
+          var r = canvas.getBoundingClientRect(); var ME = win.MouseEvent || MouseEvent;
+          canvas.dispatchEvent(new ME('mouseleave', { bubbles: true, cancelable: true, view: win, clientX: r.left + 5, clientY: r.top + 5 }));
+          canvas.dispatchEvent(new ME('mouseout', { bubbles: true, cancelable: true, view: win, clientX: r.left + 5, clientY: r.top + 5 }));
+        } catch (e) {}
+      }
+      var seedTries = 0;
+      var seedTimer = setInterval(function () {
+        if (crossSeen) { clearCrosshair(); clearInterval(seedTimer); return; }
+        if (seedTries++ > 24) { clearInterval(seedTimer); return; }
+        seedCrosshair();
+      }, 250);
+
+      // Rough pre-touch DOM seed of calibOffset (pane top within container).
+      function measureCalib() {
+        try {
+          var iframe = containerEl.querySelector('iframe'); var doc = iframe && iframe.contentDocument; if (!doc) return null;
+          var best = null, axes = doc.querySelectorAll('.price-axis');
+          for (var i = 0; i < axes.length; i++) { var r = axes[i].getBoundingClientRect(); if (r.height > 40 && (!best || r.height > best.height)) best = r; }
+          return best ? best.top : null;
+        } catch (e) { return null; }
+      }
+
+      var btnH = isTouch ? 28 : 18, btnFs = isTouch ? 12 : 10, btnPad = isTouch ? 9 : 5;
+      function mkBtn(txt, bg, onClick) {
+        var b = document.createElement('button'); b.type = 'button'; b.textContent = txt;
+        b.style.cssText = 'display:flex;align-items:center;justify-content:center;height:' + btnH + 'px;min-width:' + btnH + 'px;padding:0 ' + (txt.length > 1 ? btnPad : 0) + 'px;border:0;border-radius:4px;cursor:pointer;font-size:' + btnFs + 'px;font-weight:700;line-height:1;color:#fff;pointer-events:auto;background:' + bg + ';box-shadow:0 1px 3px rgba(0,0,0,.55);';
+        b.onclick = function (e) { e.stopPropagation(); onClick(); };
+        return b;
+      }
+      function mkDragBtn(txt, bg, kind) {
+        var color = kind === 'sl' ? '#ef4444' : '#14b8a6';
+        var zoneBg = kind === 'sl' ? 'rgba(239,68,68,0.13)' : 'rgba(20,184,166,0.13)';
+        var b = document.createElement('button'); b.type = 'button'; b.textContent = txt;
+        b.style.cssText = 'display:flex;align-items:center;justify-content:center;height:' + btnH + 'px;min-width:' + btnH + 'px;padding:0 ' + btnPad + 'px;border:0;border-radius:4px;cursor:ns-resize;touch-action:none;font-size:' + btnFs + 'px;font-weight:700;line-height:1;color:#fff;pointer-events:auto;background:' + bg + ';box-shadow:0 1px 3px rgba(0,0,0,.55);';
+        b.onpointerdown = function (e) {
+          e.preventDefault(); e.stopPropagation(); revealButtons();
+          var p = primaryPos(); if (!p) return;
+          try { b.setPointerCapture(e.pointerId); } catch (er) {}
+          var startY = e.clientY, moved = false;
+          var zone = document.createElement('div'); zone.style.cssText = 'position:absolute;left:0;right:0;top:0;height:0;background:' + zoneBg + ';pointer-events:none;z-index:6;';
+          var line = document.createElement('div'); line.style.cssText = 'position:absolute;left:0;right:0;top:0;height:0;border-top:1px dashed ' + color + ';pointer-events:none;z-index:7;';
+          var lbl = document.createElement('div'); lbl.style.cssText = 'position:absolute;right:2px;top:0;transform:translateY(-50%);background:' + color + ';color:#fff;font:700 10px system-ui;padding:1px 6px;border-radius:3px;pointer-events:none;z-index:8;white-space:nowrap;';
+          overlay.appendChild(zone); overlay.appendChild(line); overlay.appendChild(lbl);
+          var d = digitsFor(entryPx(p));
+          function entryY() { var g = geom(); if (!g || calibOffset == null) return null; return paneY(entryPx(p), g) + calibOffset; }
+          function cleanup() { [zone, line, lbl].forEach(function (el) { try { overlay.removeChild(el); } catch (e2) {} }); }
+          b.onpointermove = function (ev) {
+            revealButtons();
+            if (Math.abs(ev.clientY - startY) > 3) moved = true;
+            var r = containerEl.getBoundingClientRect(); var cy = ev.clientY - r.top;
+            var price = priceForY(cy);
+            line.style.top = cy + 'px'; lbl.style.top = cy + 'px';
+            var bad = price ? bracketError(p, kind, price) : null;
+            var ptxt = (bad ? '⚠ ' : '') + (kind === 'sl' ? 'SL' : 'TP') + ' ' + (price ? price.toFixed(d) : '—');
+            if (price && !bad) { var pnl = projectPnl(p, price); if (pnl != null) ptxt += '  ' + money(pnl); }
+            lbl.textContent = ptxt; lbl.style.background = bad ? '#ef4444' : color; line.style.borderTopColor = bad ? '#ef4444' : color;
+            var ey = entryY(); if (ey != null) { zone.style.top = Math.min(ey, cy) + 'px'; zone.style.height = Math.abs(ey - cy) + 'px'; }
+          };
+          function endDrag() { b.onpointermove = null; b.onpointerup = null; b.onpointercancel = null; cleanup(); }
+          b.onpointercancel = function (ev) { try { b.releasePointerCapture(ev.pointerId); } catch (e2) {} endDrag(); };
+          b.onpointerup = function (ev) {
+            try { b.releasePointerCapture(ev.pointerId); } catch (e2) {}
+            endDrag();
+            if (!moved) { promptBracket(p, kind); return; }
+            var r = containerEl.getBoundingClientRect(); var price = priceForY(ev.clientY - r.top);
+            if (!price || !(price > 0)) { postRN('modify_error', { error: 'price_read_failed' }); return; }
+            var err = bracketError(p, kind, price);
+            if (err) { postRN('modify_error', { error: err }); return; }
+            applyModify(p, kind === 'sl' ? { stop_loss: price } : { take_profit: price }, kind.toUpperCase());
+          };
+        };
+        return b;
+      }
+      function promptBracket(p, kind) {
+        var d = digitsFor(entryPx(p));
+        var cur = kind === 'sl' ? slPx(p) : tpPx(p);
+        tfzDialog({
+          title: kind === 'sl' ? 'Stop Loss' : 'Take Profit',
+          body: 'Enter price (blank = remove)',
+          confirmLabel: cur != null ? 'Update' : 'Set',
+          input: { defaultValue: cur != null ? cur.toFixed(d) : '', placeholder: 'Price' },
+          onConfirm: function (raw) {
+            var trimmed = (raw || '').trim();
+            var val = trimmed === '' ? null : parseFloat(trimmed);
+            if (val !== null && !(val > 0)) { postRN('modify_error', { error: 'invalid_price' }); return; }
+            if (val !== null) { var err = bracketError(p, kind, val); if (err) { postRN('modify_error', { error: err }); return; } }
+            applyModify(p, kind === 'sl' ? { stop_loss: val } : { take_profit: val }, kind.toUpperCase());
+          }
+        });
+      }
+
+      var root = document.createElement('div');
+      root.style.cssText = (isTouch ? 'position:absolute;right:96px;' : 'position:absolute;right:268px;') + 'transform:translateY(-50%);display:flex;align-items:center;gap:' + (isTouch ? 5 : 3) + 'px;pointer-events:none;visibility:hidden;z-index:6;';
+      root.appendChild(mkDragBtn('SL', 'rgba(239,68,68,0.97)', 'sl'));
+      root.appendChild(mkDragBtn('TP', 'rgba(20,184,166,0.97)', 'tp'));
+      root.appendChild(mkBtn('✕', '#5E7BFF', function () {
+        var p = primaryPos(); if (!p) return;
+        tfzDialog({
+          title: 'Close position',
+          body: 'Close ' + (isLong(p) ? 'BUY' : 'SELL') + ' ' + lotsOf(p) + ' at market?',
+          confirmLabel: 'Close', danger: true,
+          onConfirm: function () { root.style.visibility = 'hidden'; closePosition(p); }
+        });
+      }));
+      var slZone = document.createElement('div'); slZone.style.cssText = 'position:absolute;left:0;right:0;top:0;height:0;background:rgba(239,68,68,0.10);pointer-events:none;visibility:hidden;z-index:4;';
+      var tpZone = document.createElement('div'); tpZone.style.cssText = 'position:absolute;left:0;right:0;top:0;height:0;background:rgba(20,184,166,0.10);pointer-events:none;visibility:hidden;z-index:4;';
+      overlay.appendChild(slZone); overlay.appendChild(tpZone); overlay.appendChild(root);
+      root.addEventListener('pointerdown', revealButtons);
+
+      var tapZone = null;
+      if (isTouch) {
+        tapZone = document.createElement('div');
+        tapZone.style.cssText = 'position:absolute;left:0;right:0;top:0;height:40px;transform:translateY(-50%);pointer-events:auto;background:transparent;z-index:5;visibility:hidden;';
+        tapZone.addEventListener('pointerdown', revealButtons);
+        overlay.appendChild(tapZone);
+      }
+
+      var frame = 0;
+      function sync() {
+        requestAnimationFrame(sync); frame++;
+        if (!crossSeen && (calibOffset == null || frame % 20 === 0)) { var m = measureCalib(); if (m != null) calibOffset = m; }
+        var g = geom(); var p = primaryPos();
+        if (!g || calibOffset == null || !p) { root.style.visibility = 'hidden'; slZone.style.visibility = 'hidden'; tpZone.style.visibility = 'hidden'; if (tapZone) tapZone.style.visibility = 'hidden'; return; }
+        var off = calibOffset, h = containerEl.clientHeight || g.h;
+        var y = paneY(entryPx(p), g) + off; var inRange = y > 8 && y <= h - 8;
+        if (tapZone) { if (inRange) { tapZone.style.top = y + 'px'; tapZone.style.visibility = 'visible'; } else tapZone.style.visibility = 'hidden'; }
+        if (!inRange || !buttonsVisible) root.style.visibility = 'hidden'; else { root.style.top = y + 'px'; root.style.visibility = 'visible'; }
+        function drawZone(el, price) {
+          var pr = Number(price); if (!(pr > 0)) { el.style.visibility = 'hidden'; return; }
+          var zy = paneY(pr, g) + off; var top = Math.min(y, zy), ht = Math.abs(y - zy);
+          if (ht < 1) { el.style.visibility = 'hidden'; return; }
+          el.style.top = top + 'px'; el.style.height = ht + 'px'; el.style.visibility = 'visible';
+        }
+        drawZone(slZone, slPx(p)); drawZone(tpZone, tpPx(p));
+      }
+      requestAnimationFrame(sync);
+    }
+
+    widget.onChartReady(function () {
+      chart = widget.activeChart();
+      postRN('ready', { symbol: activeSymbol });
+      try {
+        chart.onSymbolChanged().subscribe(null, function () {
+          var s = chart.symbol(); var cleaned = (s && s.indexOf(':') >= 0) ? s.split(':').pop() : s;
+          if (cleaned) { activeSymbol = cleaned.toUpperCase(); Object.keys(lines).forEach(function (k) { var ex = lines[k]; if (ex && ex.id != null) { try { chart.removeEntity(ex.id); } catch (e) {} } delete lines[k]; }); positions = []; loadPositions(); postRN('symbol', activeSymbol); }
+        });
+      } catch (e) {}
+      setupOverlay();
+      loadPositions();
+      setInterval(loadPositions, 4000);
+    });
+
+    // RN → chart bridge
+    window.__tfzSetSymbol = function (sym) {
+      if (!chart || !sym) return;
+      try { activeSymbol = String(sym).toUpperCase(); Object.keys(lines).forEach(function (k) { var ex = lines[k]; if (ex && ex.id != null) { try { chart.removeEntity(ex.id); } catch (e) {} } delete lines[k]; }); positions = []; chart.setSymbol(activeSymbol, function () { loadPositions(); }); } catch (e) {}
+    };
+    window.__tfzRefreshPositions = function () { loadPositions(); };
+    } // end boot()
+  })();
+  </script>
+</body>
+</html>

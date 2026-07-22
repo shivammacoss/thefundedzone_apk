@@ -1,0 +1,228 @@
+import { WS_URL, API_URL } from '../config';
+import { getStoredToken } from '../utils/safeSecureStore';
+import {
+  extractPriceRows,
+  rowsToPriceDict,
+  messageToPriceDict,
+} from '../utils/marketData';
+
+/**
+ * Live market data: try native WebSocket (/ws/prices) first, then REST polling.
+ * React Native provides WebSocket; no need for Expo-only polling only.
+ */
+class SocketService {
+  constructor() {
+    this.ws = null;
+    this.pollingInterval = null;
+    this.isPolling = false;
+    this.intentionalDisconnect = false;
+    this.priceListeners = new Set();
+    this.tradeListeners = new Set();
+    this.accountListeners = new Map();
+    this.prices = {};
+    this.isConnected = false;
+    this.reconnectAttempts = 0;
+    this.maxReconnectAttempts = 5;
+    this.reconnectTimer = null;
+    this.lastMsgAt = 0;   // timestamp of the last fresh WS price tick
+    this.watchdog = null; // fallback poller that runs when the WS goes stale
+  }
+
+  async connect() {
+    this.intentionalDisconnect = false;
+    // Instant snapshot so prices/PnL are never empty while the WS opens.
+    this.pollPrices();
+    // Watchdog: if the WS hasn't delivered a fresh tick in a few seconds, pull
+    // a REST snapshot — so prices + live PnL keep updating even when the WS
+    // never connects or silently goes stale (no more 30s frozen window).
+    this.startWatchdog();
+    // Don't open a duplicate socket if one is already open/connecting.
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+    await this.tryWebSocket();
+  }
+
+  startWatchdog() {
+    if (this.watchdog) return;
+    this.watchdog = setInterval(() => {
+      if (this.intentionalDisconnect) return;
+      if (Date.now() - (this.lastMsgAt || 0) > 3000) {
+        this.pollPrices();
+      }
+    }, 2000);
+  }
+
+  async tryWebSocket() {
+    try {
+      // Gateway accepts anonymous /ws/prices; sending ?token= with an expired JWT closes the socket (4001).
+      const base = (WS_URL || '').replace(/\/$/, '');
+      const url = `${base}/ws/prices`;
+
+      console.log('[Socket] Trying WebSocket:', url);
+      this.ws = new WebSocket(url);
+
+      this.ws.onopen = () => {
+        console.log('[Socket] WebSocket open');
+        this.clearPolling();
+        this.isConnected = true;
+        this.reconnectAttempts = 0;
+      };
+
+      this.ws.onmessage = (event) => {
+        try {
+          const raw = JSON.parse(event.data);
+          const delta = messageToPriceDict(raw);
+          if (Object.keys(delta).length === 0) return;
+          this.prices = { ...this.prices, ...delta };
+          this.lastMsgAt = Date.now();
+          this.notifyPriceListeners(this.prices);
+        } catch (e) {
+          console.warn('[Socket] WS message parse:', e?.message);
+        }
+      };
+
+      this.ws.onerror = (e) => {
+        console.warn('[Socket] WebSocket error (falling back to poll if close follows)');
+      };
+
+      this.ws.onclose = () => {
+        this.ws = null;
+        if (this.intentionalDisconnect) {
+          this.isConnected = false;
+          return;
+        }
+        this.reconnectAttempts++;
+        if (this.reconnectAttempts <= this.maxReconnectAttempts) {
+          const delay = Math.min(2000 * this.reconnectAttempts, 15000);
+          console.log(`[Socket] WebSocket closed, reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+          this.reconnectTimer = setTimeout(() => this.tryWebSocket(), delay);
+        } else {
+          console.log('[Socket] Max reconnect attempts reached, falling back to REST poll');
+          this.startPolling();
+        }
+      };
+    } catch (e) {
+      console.warn('[Socket] WebSocket setup failed:', e?.message);
+      this.startPolling();
+    }
+  }
+
+  clearPolling() {
+    if (this.pollingInterval) {
+      clearInterval(this.pollingInterval);
+      this.pollingInterval = null;
+    }
+    this.isPolling = false;
+  }
+
+  startPolling() {
+    if (this.isPolling) return;
+    this.isPolling = true;
+    this.isConnected = true;
+    console.log('[Socket] REST polling:', `${API_URL}/instruments/prices/all`);
+
+    this.pollPrices();
+    this.pollingInterval = setInterval(() => this.pollPrices(), 2000);
+  }
+
+  async pollPrices() {
+    try {
+      const headers = await getHeaders();
+      const response = await fetch(`${API_URL}/instruments/prices/all`, { headers });
+
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        console.warn('[Socket] prices/all HTTP', response.status, text?.slice(0, 120));
+        return;
+      }
+
+      const data = await response.json().catch(() => null);
+      const rows = extractPriceRows(data);
+      if (!rows.length) {
+        return;
+      }
+
+      const pricesDict = rowsToPriceDict(rows);
+      this.prices = pricesDict;
+      this.notifyPriceListeners(pricesDict);
+    } catch (error) {
+      console.error('[Socket] Polling error:', error?.message);
+    }
+  }
+
+  notifyPriceListeners(data) {
+    this.priceListeners.forEach((callback) => {
+      try {
+        callback(data);
+      } catch (e) {
+        console.error('[Socket] Price listener error:', e);
+      }
+    });
+  }
+
+  addPriceListener(callback) {
+    this.priceListeners.add(callback);
+    if (Object.keys(this.prices).length > 0) {
+      callback(this.prices);
+    }
+    return () => this.priceListeners.delete(callback);
+  }
+
+  removePriceListener(callback) {
+    this.priceListeners.delete(callback);
+  }
+
+  disconnect() {
+    this.intentionalDisconnect = true;
+    this.clearPolling();
+    if (this.watchdog) { clearInterval(this.watchdog); this.watchdog = null; }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+    this.isConnected = false;
+    this.reconnectAttempts = 0;
+    this.priceListeners.clear();
+    console.log('[Socket] Disconnected');
+  }
+
+  getPrices() {
+    return this.prices;
+  }
+
+  getPrice(symbol) {
+    return this.prices[symbol];
+  }
+
+  isSocketConnected() {
+    return this.isConnected;
+  }
+
+  subscribeToPrices() {}
+  unsubscribePrices() {}
+  subscribeToAccount() {}
+  unsubscribeFromAccount() {}
+  addTradeListener(cb) {
+    this.tradeListeners.add(cb);
+    return () => this.tradeListeners.delete(cb);
+  }
+  addAccountListener() {
+    return () => {};
+  }
+}
+
+async function getHeaders() {
+  const token = await getStoredToken();
+  return {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
+
+const socketService = new SocketService();
+export default socketService;
