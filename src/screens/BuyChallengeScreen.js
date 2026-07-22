@@ -31,6 +31,7 @@ export function BuyChallengePanel({ navigation }) {
   const [selectedId, setSelectedId] = useState(null);
   const [tier, setTier] = useState(null);
   const [payVia, setPayVia] = useState('wallet');
+  const [payLater, setPayLater] = useState(false);
   const [buying, setBuying] = useState(false);
 
   const load = useCallback(async () => {
@@ -56,7 +57,15 @@ export function BuyChallengePanel({ navigation }) {
       : selected.profit_target_phase1_percent
     : null;
 
-  const selectProgram = (c) => { setSelectedId(c.id); setTier(null); setPayVia('wallet'); };
+  const selectProgram = (c) => { setSelectedId(c.id); setTier(null); setPayVia('wallet'); setPayLater(false); };
+
+  // Pay Later: pay a small fee now; on passing, pay the tier's original_price
+  // (falls back to the standard fee) to unlock the funded account.
+  const payLaterFee = selected?.pay_later_fee ?? 9;
+  const payLaterFinal = tier
+    ? (tier.original_price != null && Number(tier.original_price) > 0 ? Number(tier.original_price) : tier.fee)
+    : 0;
+  const payStep = selected?.pay_later_enabled ? 4 : 3;
 
   const confirmBuy = async () => {
     if (!selected || !tier) return;
@@ -65,7 +74,7 @@ export function BuyChallengePanel({ navigation }) {
       const res = await ApiService.buyChallenge({
         challenge_id: selected.id,
         fund_size: tier.fund_size,
-        purchase_type: 'standard',
+        purchase_type: payLater ? 'pay_later' : 'standard',
         payment_method: payVia,
       });
       if (res?.pending_payment && res.payment?.checkout_url) {
@@ -152,9 +161,38 @@ export function BuyChallengePanel({ navigation }) {
         })}
       </View>
 
+      {selected?.pay_later_enabled && tier && (
+        <>
+          <Text style={[styles.stepTitle, { color: colors.textPrimary, marginTop: 18 }]}>3. Purchase mode</Text>
+          <View style={{ flexDirection: 'row', gap: 10 }}>
+            <TouchableOpacity
+              onPress={() => setPayLater(false)}
+              activeOpacity={0.85}
+              style={[styles.modeCard, { backgroundColor: colors.bgCard, borderColor: !payLater ? colors.accent : colors.border }, !payLater && { borderWidth: 2 }]}
+            >
+              <Text style={{ color: colors.textPrimary, fontWeight: '800', fontSize: 13 }}>Standard</Text>
+              <Text style={{ color: colors.textMuted, fontSize: 11, marginTop: 3 }}>Pay {money(tier.fee)} now</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => setPayLater(true)}
+              activeOpacity={0.85}
+              style={[styles.modeCard, { backgroundColor: colors.bgCard, borderColor: payLater ? colors.accent : colors.border }, payLater && { borderWidth: 2 }]}
+            >
+              <Text style={{ color: colors.textPrimary, fontWeight: '800', fontSize: 13 }}>Pay Later</Text>
+              <Text style={{ color: colors.textMuted, fontSize: 11, marginTop: 3 }}>Pay {money(payLaterFee)} now</Text>
+            </TouchableOpacity>
+          </View>
+          {payLater && (
+            <Text style={{ color: colors.textMuted, fontSize: 11.5, lineHeight: 17, marginTop: 8 }}>
+              Pay {money(payLaterFee)} now to start the evaluation. If you pass, pay {money(payLaterFinal)} to unlock your funded account.
+            </Text>
+          )}
+        </>
+      )}
+
       {selected?.gateway_enabled && tier && (
         <>
-          <Text style={[styles.stepTitle, { color: colors.textPrimary, marginTop: 18 }]}>3. Payment method</Text>
+          <Text style={[styles.stepTitle, { color: colors.textPrimary, marginTop: 18 }]}>{payStep}. Payment method</Text>
           <View style={{ flexDirection: 'row', gap: 10 }}>
             {[{ id: 'wallet', label: 'Wallet' }, { id: 'gateway', label: 'Pay via Crypto' }].map((m) => {
               const active = payVia === m.id;
@@ -185,7 +223,11 @@ export function BuyChallengePanel({ navigation }) {
         >
           {buying ? <ActivityIndicator color="#fff" /> : (
             <Text style={styles.confirmText}>
-              {payVia === 'gateway' ? 'Continue to payment' : `Confirm & pay ${money(tier.fee)}`}
+              {payVia === 'gateway'
+                ? 'Continue to payment'
+                : payLater
+                  ? `Pay ${money(payLaterFee)} & start`
+                  : `Confirm & pay ${money(tier.fee)}`}
             </Text>
           )}
         </TouchableOpacity>
@@ -231,6 +273,7 @@ const styles = StyleSheet.create({
   tierSize: { fontSize: 17, fontWeight: '800' },
   tierFee: { fontSize: 11.5, marginTop: 4 },
   payBtn: { flex: 1, borderWidth: 1, borderRadius: 12, paddingVertical: 12, alignItems: 'center' },
+  modeCard: { flex: 1, borderWidth: 1, borderRadius: 12, paddingVertical: 12, paddingHorizontal: 12, alignItems: 'flex-start' },
   confirm: { paddingVertical: 15, borderRadius: 12, alignItems: 'center' },
   confirmText: { color: '#fff', fontWeight: '800', fontSize: 15 },
 });
