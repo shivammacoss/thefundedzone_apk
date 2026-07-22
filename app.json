@@ -17,8 +17,9 @@
     },
     "updates": {
       "enabled": true,
+      "checkAutomatically": "ON_LOAD",
       "fallbackToCacheTimeout": 3000,
-      "url": "https://u.expo.dev/985ec4ac-3e2f-44d1-9584-70b5d7dc4e5e"
+      "url": "https://u.expo.dev/33bc0fdc-6eb5-4a77-887e-eec69796d054"
     },
     "ios": {
       "supportsTablet": true,
@@ -57,7 +58,7 @@
     },
     "extra": {
       "eas": {
-        "projectId": "985ec4ac-3e2f-44d1-9584-70b5d7dc4e5e"
+        "projectId": "33bc0fdc-6eb5-4a77-887e-eec69796d054"
       }
     },
     "plugins": [
@@ -66,6 +67,7 @@
       "expo-secure-store",
       "expo-web-browser",
       "./plugins/withChartLibrary"
-    ]
+    ],
+    "owner": "shivam92388"
   }
 }
