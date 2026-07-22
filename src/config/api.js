@@ -31,8 +31,8 @@ export const WS_URL = trimOrEmpty(ENV_WS_URL) || derivedWs;
 // the Android/iOS ids for native builds. Google sign-in button hides itself
 // until at least one id is set.
 export const GOOGLE_AUTH = {
-  webClientId: '',
-  androidClientId: '',
+  webClientId: '427190660995-l321kv0kv2p3rj0uhk04dajdfll54mdq.apps.googleusercontent.com',
+  androidClientId: '427190660995-dfn589tv17h4d1ja0tcckpacu258o4ve.apps.googleusercontent.com',
   iosClientId: '',
 };
 

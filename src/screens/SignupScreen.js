@@ -212,7 +212,6 @@ const SignupScreen = ({ navigation }) => {
           />
           <Text style={styles.brandName}>
             <Text style={{ color: '#F5F7FA' }}>The Funded Zone</Text>
-            <Text style={{ color: '#1a73e8' }}>FX</Text>
           </Text>
           <Text style={styles.brandTagline}>Trade with confidence</Text>
         </View>

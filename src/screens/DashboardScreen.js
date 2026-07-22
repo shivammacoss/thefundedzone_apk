@@ -341,7 +341,6 @@ const DashboardScreen = () => {
       <View style={[S.topBar, { backgroundColor: colors.bgPrimary, borderBottomColor: colors.border }]}>
         <Text style={S.logo}>
           <Text style={{ color: colors.textPrimary }}>The Funded Zone</Text>
-          <Text style={{ color: colors.accent }}>FX</Text>
         </Text>
 
         <View style={S.topRight}>

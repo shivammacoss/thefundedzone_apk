@@ -2575,7 +2575,6 @@ const HomeTab = ({ navigation }) => {
                 />
                 <Text style={{ fontSize: 17, fontWeight: '800', letterSpacing: -0.3 }}>
                   <Text style={{ color: colors.textPrimary }}>The Funded Zone</Text>
-                  <Text style={{ color: colors.primary }}>FX</Text>
                 </Text>
               </View>
               <TouchableOpacity onPress={() => closeDrawer()} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>

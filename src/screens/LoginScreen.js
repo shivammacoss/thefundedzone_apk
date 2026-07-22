@@ -16,15 +16,19 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
 import { Image } from 'react-native';
-import * as Google from 'expo-auth-session/providers/google';
-import * as WebBrowser from 'expo-web-browser';
+import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
 import { API_URL, GOOGLE_AUTH } from '../config';
-
-WebBrowser.maybeCompleteAuthSession();
 
 const { width, height } = Dimensions.get('window');
 const AUTH_URL = `${API_URL}/auth`;
 const GOOGLE_ENABLED = !!(GOOGLE_AUTH?.webClientId || GOOGLE_AUTH?.androidClientId || GOOGLE_AUTH?.iosClientId);
+
+// Native Google Sign-In. webClientId mints the ID token (aud = webClientId,
+// which the backend verifies); the Android OAuth client (package + SHA-1)
+// authorises the app automatically.
+if (GOOGLE_ENABLED && GOOGLE_AUTH.webClientId) {
+  GoogleSignin.configure({ webClientId: GOOGLE_AUTH.webClientId, offlineAccess: false });
+}
 
 const LoginScreen = ({ navigation }) => {
   const [loading, setLoading] = useState(false);
@@ -190,7 +194,6 @@ const LoginScreen = ({ navigation }) => {
           />
           <Text style={styles.brandName}>
             <Text style={{ color: '#F5F7FA' }}>The Funded Zone</Text>
-            <Text style={{ color: '#1a73e8' }}>FX</Text>
           </Text>
           <Text style={styles.brandTagline}>Trade with confidence</Text>
         </View>
@@ -261,10 +264,7 @@ const LoginScreen = ({ navigation }) => {
           )}
         </TouchableOpacity>
 
-        {/* Google Sign-In (shown when a client id is configured).
-            Rendered as a child so the auth hook only runs when client
-            IDs exist — calling useIdTokenAuthRequest with an empty
-            config throws at mount. */}
+        {/* Google Sign-In — shown only when a client id is configured. */}
         {GOOGLE_ENABLED && (
           <GoogleSignInButton loading={loading} onToken={handleGoogleLogin} />
         )}
@@ -458,21 +458,36 @@ const styles = StyleSheet.create({
   },
 });
 
-// Google button + auth hook, isolated in a child so the hook only mounts
-// when at least one client id is configured (an empty config throws).
+// Native Google Sign-In button. Uses the device's Google account picker
+// (@react-native-google-signin) — the ID token's aud is the Web client ID,
+// which the backend verifies.
 const GoogleSignInButton = ({ loading, onToken }) => {
-  const [request, response, promptAsync] = Google.useIdTokenAuthRequest({
-    clientId: GOOGLE_AUTH.webClientId || undefined,
-    androidClientId: GOOGLE_AUTH.androidClientId || undefined,
-    iosClientId: GOOGLE_AUTH.iosClientId || undefined,
-  });
+  const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    if (response?.type === 'success') {
-      const idToken = response.params?.id_token || response.authentication?.idToken;
-      if (idToken) onToken(idToken);
+  const onPress = async () => {
+    try {
+      setBusy(true);
+      await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
+      const result = await GoogleSignin.signIn();
+      // v13+ returns { type, data: { idToken } }; older returns { idToken }.
+      const idToken = result?.data?.idToken || result?.idToken;
+      if (idToken) {
+        await onToken(idToken);
+      } else {
+        Alert.alert('Google Sign-In', 'No ID token was returned. Please try again.');
+      }
+    } catch (e) {
+      if (e?.code === statusCodes.SIGN_IN_CANCELLED || e?.code === statusCodes.IN_PROGRESS) {
+        // user cancelled or a sign-in is already in progress — no-op
+      } else if (e?.code === statusCodes.PLAY_SERVICES_NOT_AVAILABLE) {
+        Alert.alert('Google Sign-In', 'Google Play Services is not available on this device.');
+      } else {
+        Alert.alert('Google Sign-In Failed', e?.message || 'Please try again.');
+      }
+    } finally {
+      setBusy(false);
     }
-  }, [response]);
+  };
 
   return (
     <>
@@ -483,12 +498,14 @@ const GoogleSignInButton = ({ loading, onToken }) => {
       </View>
       <TouchableOpacity
         style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, paddingVertical: 14, borderRadius: 12, borderWidth: 1, borderColor: '#e2e8f0', backgroundColor: '#fff' }}
-        disabled={!request || loading}
-        onPress={() => promptAsync()}
+        disabled={loading || busy}
+        onPress={onPress}
         activeOpacity={0.8}
       >
         <Ionicons name="logo-google" size={18} color="#EA4335" />
-        <Text style={{ color: '#0f172a', fontWeight: '700', fontSize: 15 }}>Continue with Google</Text>
+        <Text style={{ color: '#0f172a', fontWeight: '700', fontSize: 15 }}>
+          {busy ? 'Please wait…' : 'Continue with Google'}
+        </Text>
       </TouchableOpacity>
     </>
   );
